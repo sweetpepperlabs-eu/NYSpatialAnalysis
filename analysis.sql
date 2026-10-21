@@ -6,16 +6,16 @@
 -- analysis and a 100-meter coverage analysis.
 --
 -- Assumes:
---   - Database "nyc" with PostGIS extension enabled
+--   - Database "gis" on localhost:5433, user "gis", with PostGIS enabled
 --   - Tables loaded:
 --       nyc_neighborhoods (polygon, EPSG:4326, geom column called "geom",
---                          attributes including "neighborhood" and "borough")
+--                          attributes including "ntaname" and "boroname")
 --       nyc_hydrants      (point,   EPSG:4326, geom column called "geom",
 --                          attributes including "hydrant_id")
 --   - Spatial indexes on both geom columns (CREATE INDEX ... USING GIST (geom))
 --
 -- Run all queries:
---   psql -h localhost -U gisuser -d nyc -f analysis.sql
+--   psql -h localhost -p 5433 -U gis -d gis -f analysis.sql
 -- =============================================================================
 
 
@@ -26,10 +26,10 @@
 -- Expected output: ~37 rows (Manhattan neighborhoods).
 -- -----------------------------------------------------------------------------
 
-SELECT neighborhood, borough
+SELECT ntaname, boroname
 FROM nyc_neighborhoods
-WHERE borough = 'Manhattan'
-ORDER BY neighborhood;
+WHERE boroname = 'Manhattan'
+ORDER BY ntaname;
 
 
 -- -----------------------------------------------------------------------------
@@ -40,10 +40,11 @@ ORDER BY neighborhood;
 -- Expected output: one row per hydrant (~109,725) with the neighborhood name.
 -- -----------------------------------------------------------------------------
 
--- [TODO] Write a query that selects h.hydrant_id, n.neighborhood, n.borough
--- by joining nyc_hydrants h to nyc_neighborhoods n using
--- ST_Contains(n.geom, h.geom).
--- Use LIMIT 10 for a first peek so you don't print the whole result set.
+SELECT h.unitid, n.ntaname, n.boroname
+FROM nyc_hydrants AS h
+JOIN nyc_neighborhoods AS n
+  ON ST_Contains(n.wkb_geometry, h.wkb_geometry)
+LIMIT 10;
 
 
 -- -----------------------------------------------------------------------------
@@ -53,8 +54,12 @@ ORDER BY neighborhood;
 -- Expected output: 262 rows (one per neighborhood) with a hydrant_count.
 -- -----------------------------------------------------------------------------
 
--- [TODO] Take Query 2 and wrap it in a GROUP BY. Use COUNT(h.*) to count
--- hydrants per neighborhood. ORDER BY hydrant_count DESC.
+SELECT n.ntaname, n.boroname, COUNT(h.*) AS hydrant_count
+FROM nyc_neighborhoods AS n
+LEFT JOIN nyc_hydrants AS h
+  ON ST_Contains(n.wkb_geometry, h.wkb_geometry)
+GROUP BY n.ntaname, n.boroname
+ORDER BY hydrant_count DESC;
 
 
 -- -----------------------------------------------------------------------------
@@ -66,11 +71,17 @@ ORDER BY neighborhood;
 -- Expected output: 262 rows with hydrant_count, area_km2, density_per_km2.
 -- -----------------------------------------------------------------------------
 
--- [TODO] Extend Query 3 with:
---   - ST_Area(ST_Transform(n.geom, 2263)) / 10763910.42  AS area_km2
---     (10,763,910.42 square feet = 1 square kilometer)
---   - hydrant_count / area_km2  AS density_per_km2
--- ORDER BY density_per_km2 DESC.
+SELECT
+  n.ntaname,
+  n.boroname,
+  COUNT(h.*) AS hydrant_count,
+  ST_Area(ST_Transform(n.wkb_geometry, 2263)) / 10763910.42 AS area_km2,
+  COUNT(h.*) / (ST_Area(ST_Transform(n.wkb_geometry, 2263)) / 10763910.42) AS density_per_km2
+FROM nyc_neighborhoods AS n
+LEFT JOIN nyc_hydrants AS h
+  ON ST_Contains(n.wkb_geometry, h.wkb_geometry)
+GROUP BY n.gid
+ORDER BY density_per_km2 DESC;
 
 
 -- -----------------------------------------------------------------------------
@@ -81,14 +92,23 @@ ORDER BY neighborhood;
 -- Expected output: 262 rows with neighborhood, area_km2, covered_pct.
 -- -----------------------------------------------------------------------------
 
--- [TODO] Build this in two CTEs:
---   1. hydrant_coverage: ST_Union(ST_Buffer(ST_Transform(geom, 2263), 100))
---      across ALL hydrants. (One big multipolygon of 100m buffers.)
---   2. The main SELECT: for each neighborhood, compute
---        ST_Area(ST_Intersection(ST_Transform(n.geom, 2263), hc.coverage_geom))
---        divided by ST_Area(ST_Transform(n.geom, 2263))
---      to get the percent of each neighborhood within 100m of a hydrant.
--- ORDER BY covered_pct DESC.
+-- EPSG:2263 uses US survey feet. 100 meters = 100 * 3937/1200 feet.
+WITH hydrant_coverage AS (
+  SELECT ST_Union(
+    ST_Buffer(ST_Transform(wkb_geometry, 2263), 100 * 3937.0 / 1200)
+  ) AS coverage_geom
+  FROM nyc_hydrants
+)
+SELECT
+  n.ntaname,
+  n.boroname,
+  ST_Area(ST_Transform(n.wkb_geometry, 2263)) / 10763910.42 AS area_km2,
+  ST_Area(
+    ST_Intersection(ST_Transform(n.wkb_geometry, 2263), hc.coverage_geom)
+  ) / ST_Area(ST_Transform(n.wkb_geometry, 2263)) AS covered_pct
+FROM nyc_neighborhoods AS n
+CROSS JOIN hydrant_coverage AS hc
+ORDER BY covered_pct DESC;
 
 
 -- =============================================================================
